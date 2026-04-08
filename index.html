@@ -8,7 +8,7 @@
 <!-- Firebase SDK -->
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getFirestore, collection, addDoc, getDocs, updateDoc, deleteDoc, doc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+import { getFirestore, collection, addDoc, getDocs, updateDoc, deleteDoc, setDoc, doc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyCo7cplU-zdia3NMM7cd1sa-GQJENNNIlg",
@@ -23,7 +23,7 @@ const app = initializeApp(firebaseConfig);
 const db  = getFirestore(app);
 
 // Expose to global scope so the main <script> can use it
-window._fb = { db, collection, addDoc, getDocs, updateDoc, deleteDoc, doc, onSnapshot };
+window._fb = { db, collection, addDoc, getDocs, updateDoc, deleteDoc, setDoc, doc, onSnapshot };
 window._fbReady = true;
 console.log("✅ Firebase conectado ao projeto:", firebaseConfig.projectId);
 </script>
@@ -354,63 +354,52 @@ const S = {
   editId: null,
 };
 
-// ── PERSISTENCE (Firebase primary, localStorage fallback) ────
-const COLL_CARGAS   = 'cargas';
-const COLL_PRODS    = 'produtos';
+// ── PERSISTENCE ──────────────────────────────────────────────
+// Firebase é a fonte única da verdade.
+// localStorage NÃO é usado para evitar duplicações.
+// Cada carga usa seu próprio .id como ID do documento no Firestore.
 
-function saveLocal() {
-  localStorage.setItem('be8', JSON.stringify({cargas:S.cargas,produtos:S.produtos}));
-}
-function loadLocal() {
-  try {
-    const d = JSON.parse(localStorage.getItem('be8')||'{}');
-    if (d.cargas)   S.cargas   = d.cargas;
-    if (d.produtos) S.produtos = d.produtos;
-  } catch(e){}
-}
+const COLL_CARGAS = 'cargas';
+const COLL_PRODS  = 'produtos';
 
-// Alias used by legacy calls
+// save() chamado pelo código legado após qualquer alteração
 const save = () => {
-  saveLocal();
   if (window._fbReady) syncToFirebase();
 };
 
+// Grava/atualiza uma única carga no Firestore usando c.id como doc ID
+async function fbSetCarga(c) {
+  const {db, doc, updateDoc} = window._fb;
+  // setDoc com merge garante criação ou atualização sem duplicar
+  const {setDoc} = window._fb;
+  await setDoc(doc(db, COLL_CARGAS, c.id), c);
+}
+
+// Grava/atualiza todos os produtos
+async function fbSetProdutos() {
+  const {db, doc, setDoc} = window._fb;
+  for (const p of S.produtos) {
+    await setDoc(doc(db, COLL_PRODS, p.nome), p);
+  }
+}
+
+// Remove carga do Firestore
+async function fbDeleteCarga(id) {
+  const {db, doc, deleteDoc} = window._fb;
+  await deleteDoc(doc(db, COLL_CARGAS, id));
+}
+
+// Remove produto do Firestore
+async function fbDeleteProduto(nome) {
+  const {db, doc, deleteDoc} = window._fb;
+  await deleteDoc(doc(db, COLL_PRODS, nome));
+}
+
 async function syncToFirebase() {
   try {
-    const {db, collection, getDocs, addDoc, updateDoc, deleteDoc, doc} = window._fb;
-    // We use a simple "replace all" strategy for produtos (small collection)
-    // For cargas we use upsert by id field
-    const cRef = collection(db, COLL_CARGAS);
-    const snap = await getDocs(cRef);
-    const remote = {}; snap.forEach(d=>{ remote[d.data().appId]=d.id; });
+    await fbSetProdutos();
     for (const c of S.cargas) {
-      if (remote[c.id]) {
-        await updateDoc(doc(db, COLL_CARGAS, remote[c.id]), c);
-      } else {
-        await addDoc(cRef, c);
-      }
-    }
-    // Delete remote docs not in local
-    for (const [appId, docId] of Object.entries(remote)) {
-      if (!S.cargas.find(c=>c.id===appId)) {
-        await deleteDoc(doc(db, COLL_CARGAS, docId));
-      }
-    }
-    // Sync produtos
-    const pRef = collection(db, COLL_PRODS);
-    const pSnap = await getDocs(pRef);
-    const remoteP = {}; pSnap.forEach(d=>{ remoteP[d.data().nome]=d.id; });
-    for (const p of S.produtos) {
-      if (remoteP[p.nome]) {
-        await updateDoc(doc(db, COLL_PRODS, remoteP[p.nome]), p);
-      } else {
-        await addDoc(pRef, p);
-      }
-    }
-    for (const [nome, docId] of Object.entries(remoteP)) {
-      if (!S.produtos.find(p=>p.nome===nome)) {
-        await deleteDoc(doc(db, COLL_PRODS, docId));
-      }
+      await fbSetCarga(c);
     }
   } catch(e) { console.warn('Firebase sync error:', e); }
 }
@@ -418,21 +407,29 @@ async function syncToFirebase() {
 async function loadFromFirebase() {
   try {
     const {db, collection, getDocs} = window._fb;
+    // Limpar localStorage para nunca mais duplicar
+    localStorage.removeItem('be8');
+
     const cSnap = await getDocs(collection(db, COLL_CARGAS));
-    if (!cSnap.empty) {
-      S.cargas = [];
-      cSnap.forEach(d=>{ S.cargas.push(d.data()); });
-    }
+    S.cargas = [];
+    cSnap.forEach(d => { S.cargas.push(d.data()); });
+    // Deduplicar por id (segurança)
+    const seen = new Set();
+    S.cargas = S.cargas.filter(c => {
+      if (seen.has(c.id)) return false;
+      seen.add(c.id); return true;
+    });
+
     const pSnap = await getDocs(collection(db, COLL_PRODS));
     if (!pSnap.empty) {
       S.produtos = [];
-      pSnap.forEach(d=>{ S.produtos.push(d.data()); });
+      pSnap.forEach(d => { S.produtos.push(d.data()); });
     }
-    console.log("✅ Dados carregados do Firebase:", S.cargas.length, "cargas,", S.produtos.length, "produtos");
-  } catch(e) { console.warn('Firebase load error:', e); loadLocal(); }
+    console.log('✅ Firebase carregado:', S.cargas.length, 'cargas,', S.produtos.length, 'produtos');
+  } catch(e) { console.warn('Firebase load error:', e); }
 }
 
-function load() { loadLocal(); }
+function load() { /* Firebase only — sem localStorage */ }
 
 // ── WEEK ──────────────────────────────────────────────────────
 function weekDays(off=0) {
@@ -675,28 +672,32 @@ function saveCargo() {
   if(!u||!cl||!dt){ toast('Preencha Usina, Cliente e Data.','err'); return; }
   const c={usina:u,produto:pr,cliente:cl,data:dt,peso:parseFloat(g('fPs'))||0,
     transportadora:g('fTr').trim(),placa:g('fPl').trim(),obs:g('fOb').trim()};
+  let savedCargo;
   if(S.editId){
     const idx=S.cargas.findIndex(x=>x.id===S.editId);
-    if(idx>-1){ c.id=S.editId; c.loaded=S.cargas[idx].loaded; S.cargas[idx]=c; }
+    if(idx>-1){ c.id=S.editId; c.loaded=S.cargas[idx].loaded; S.cargas[idx]=c; savedCargo=c; }
     toast('Carga atualizada!');
   } else {
-    c.id=uid(); c.loaded=false; S.cargas.push(c);
+    c.id=uid(); c.loaded=false; S.cargas.push(c); savedCargo=c;
     toast('Carga adicionada!');
   }
-  save(); closeMo('cargoMo'); renderAll();
+  if(window._fbReady && savedCargo) fbSetCarga(savedCargo);
+  closeMo('cargoMo'); renderAll();
 }
 
-function delCargo(id) {
+async function delCargo(id) {
   if(!confirm('Excluir esta carga?')) return;
   S.cargas=S.cargas.filter(c=>c.id!==id);
-  save(); renderAll(); toast('Carga excluída.');
+  if(window._fbReady) await fbDeleteCarga(id);
+  renderAll(); toast('Carga excluída.');
 }
 
-function toggleLoad(id) {
+async function toggleLoad(id) {
   const c=S.cargas.find(x=>x.id===id);
   if(!c) return;
   c.loaded=!c.loaded;
-  save(); renderAll();
+  if(window._fbReady) await fbSetCarga(c);
+  renderAll();
   toast(c.loaded?'✓ Carregado!':'Marcado como pendente.');
 }
 
@@ -744,7 +745,7 @@ function addProd() {
   S.produtos.push({nome:v,unidade:u}); document.getElementById('fNP').value='';
   save(); renderProdList(); renderAll(); toast('Produto adicionado!');
 }
-function removeProd(i){ S.produtos.splice(i,1); save(); renderProdList(); renderAll(); }
+async function removeProd(i){ const nome=S.produtos[i].nome; S.produtos.splice(i,1); if(window._fbReady) await fbDeleteProduto(nome); save(); renderProdList(); renderAll(); }
 
 // ── TOAST ─────────────────────────────────────────────────────
 function toast(msg, type='') {
