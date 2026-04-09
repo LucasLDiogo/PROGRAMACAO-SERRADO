@@ -440,10 +440,25 @@ async function fbDeleteProduto(nome) {
   await deleteDoc(doc(db, COLL_PRODS, nome));
 }
 
+// Grava/atualiza usinas
+async function fbSetUsinas() {
+  const {db, setDoc, doc} = window._fb;
+  for (const u of S.usinas) {
+    await setDoc(doc(db, 'usinas', u.nome), u);
+  }
+}
+// Remove usina
+async function fbDeleteUsina(nome) {
+  const {db, deleteDoc, doc} = window._fb;
+  await deleteDoc(doc(db, 'usinas', nome));
+}
+
 // save() called by legacy CRUD — writes individual doc, no full sync
 const save = () => {};  // individual writes handle persistence now
 
 // ── REALTIME LISTENERS ────────────────────────────────────────
+let _unsubUsinas = null;
+
 function startRealtimeListeners() {
   if (!window._fbReady) return;
   const {db, collection, onSnapshot} = window._fb;
@@ -469,11 +484,22 @@ function startRealtimeListeners() {
     }
     console.log('🔄 Produtos sync:', S.produtos.length);
   }, err => console.warn('Produtos listener error:', err));
+
+  // Listen to usinas
+  _unsubUsinas = onSnapshot(collection(db, 'usinas'), snap => {
+    if (!snap.empty) {
+      S.usinas = [];
+      snap.forEach(d => S.usinas.push(d.data()));
+      renderAll();
+    }
+    console.log('🔄 Usinas sync:', S.usinas.length);
+  }, err => console.warn('Usinas listener error:', err));
 }
 
 function stopRealtimeListeners() {
   if (_unsubCargas) { _unsubCargas(); _unsubCargas = null; }
   if (_unsubProds)  { _unsubProds();  _unsubProds  = null; }
+  if (_unsubUsinas) { _unsubUsinas(); _unsubUsinas = null; }
 }
 
 async function loadFromFirebase() {
@@ -795,7 +821,7 @@ function addProd() {
   if(!v) return;
   if(S.produtos.find(p=>p.nome===v)){ toast('Produto já existe!','err'); return; }
   S.produtos.push({nome:v,unidade:u}); document.getElementById('fNP').value='';
-  save(); renderProdList(); renderAll(); toast('Produto adicionado!');
+  if(window._fbReady) fbSetProdutos(); save(); renderProdList(); renderAll(); toast('Produto adicionado!');
 }
 async function removeProd(i){ const nome=S.produtos[i].nome; S.produtos.splice(i,1); if(window._fbReady) await fbDeleteProduto(nome); save(); renderProdList(); renderAll(); }
 
@@ -867,6 +893,17 @@ async function startApp() {
   if (window._fbReady) {
     document.getElementById('banner').style.display = 'none';
     await loadFromFirebase();  // starts onSnapshot listeners
+    // Se não há usinas no Firestore ainda, grava as padrão
+    setTimeout(async () => {
+      try {
+        const {db, collection, getDocs} = window._fb;
+        const snap = await getDocs(collection(db, 'usinas'));
+        if (snap.empty) {
+          await fbSetUsinas();
+          console.log('✅ Usinas padrão gravadas no Firestore');
+        }
+      } catch(e) { console.warn('Erro ao inicializar usinas:', e); }
+    }, 2000);
   } else {
     document.getElementById('banner').style.display = 'flex';
     renderAll();
